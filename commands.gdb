@@ -1,7 +1,6 @@
-set print null-stop on
-tbreak exec
+b exec
 c
 p cpus[$tp].proc->name
-tbreak kernel/exec.c:100
+b kernel/exec.c:100
 c
 p cpus[$tp].proc->name
