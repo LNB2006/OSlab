@@ -14,17 +14,242 @@ index df87a25..93ef496 100644
  ifeq ($(LAB),syscall)
 diff --git a/commands.gdb b/commands.gdb
 new file mode 100644
-index 0000000..2b55991
+index 0000000..314e2e9
 --- /dev/null
 +++ b/commands.gdb
-@@ -0,0 +1,7 @@
-+set print null-stop on
-+tbreak exec
+@@ -0,0 +1,6 @@
++b exec
 +c
 +p cpus[$tp].proc->name
-+tbreak kernel/exec.c:100
++b kernel/exec.c:100
 +c
 +p cpus[$tp].proc->name
+diff --git a/commit.patch b/commit.patch
+new file mode 100644
+index 0000000..80d9c32
+--- /dev/null
++++ b/commit.patch
+@@ -0,0 +1,217 @@
++diff --git a/Makefile b/Makefile
++index df87a25..93ef496 100644
++--- a/Makefile
+++++ b/Makefile
++@@ -157,6 +157,9 @@ UPROGS=\
++ 	$U/_grind\
++ 	$U/_wc\
++ 	$U/_zombie\
+++	$U/_sleep\
+++	$U/_pingpong\
+++	$U/_find\
++ 
++ 
++ ifeq ($(LAB),syscall)
++diff --git a/commands.gdb b/commands.gdb
++new file mode 100644
++index 0000000..2b55991
++--- /dev/null
+++++ b/commands.gdb
++@@ -0,0 +1,7 @@
+++set print null-stop on
+++tbreak exec
+++c
+++p cpus[$tp].proc->name
+++tbreak kernel/exec.c:100
+++c
+++p cpus[$tp].proc->name
++diff --git a/user/find.c b/user/find.c
++new file mode 100644
++index 0000000..d3d2046
++--- /dev/null
+++++ b/user/find.c
++@@ -0,0 +1,119 @@
+++#include "kernel/types.h"
+++#include "kernel/stat.h"
+++#include "kernel/fs.h"
+++#include "kernel/fcntl.h"
+++#include "user/user.h"
+++
+++#define PATH_SIZE 512
+++
+++// 判断路径最后一段是否与目标名称相同。
+++static int
+++match_name(char *path, char *target)
+++{
+++    int end = strlen(path);
+++
+++    // 忽略路径末尾的斜杠。
+++    while(end > 0 && path[end - 1] == '/')
+++        end--;
+++
+++    int start = end;
+++    while(start > 0 && path[start - 1] != '/')
+++        start--;
+++
+++    int len = end - start;
+++
+++    return len == strlen(target) &&
+++           memcmp(path + start, target, len) == 0;
+++}
+++
+++static int
+++find(char *path, char *target)
+++{
+++    int fd = open(path, O_RDONLY);
+++    if(fd < 0){
+++        fprintf(2, "find: cannot open %s\n", path);
+++        return 1;
+++    }
+++
+++    struct stat st;
+++    if(fstat(fd, &st) < 0){
+++        fprintf(2, "find: cannot stat %s\n", path);
+++        close(fd);
+++        return 1;
+++    }
+++
+++    // 文件和目录都可以匹配，每个路径只打印一次。
+++    if((st.type == T_FILE || st.type == T_DIR) &&
+++       match_name(path, target)){
+++        printf("%s\n", path);
+++    }
+++
+++    // 普通文件不需要继续遍历。
+++    if(st.type != T_DIR){
+++        close(fd);
+++        return 0;
+++    }
+++
+++    struct dirent de;
+++    char name[DIRSIZ + 1];
+++    char child[PATH_SIZE];
+++
+++    int path_len = strlen(path);
+++    int need_slash = path_len > 0 && path[path_len - 1] != '/';
+++    int status = 0;
+++    int n;
+++
+++    // 逐个读取目录项。
+++    while((n = read(fd, &de, sizeof(de))) == sizeof(de)){
+++        if(de.inum == 0)
+++            continue;
+++
+++        // 目录项名称不保证以 '\0' 结尾，需要手动补上。
+++        memmove(name, de.name, DIRSIZ);
+++        name[DIRSIZ] = '\0';
+++
+++        // 跳过当前目录和父目录，避免无限递归。
+++        if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+++            continue;
+++
+++        int name_len = strlen(name);
+++
+++        if(path_len + need_slash + name_len + 1 > PATH_SIZE){
+++            fprintf(2, "find: path too long under %s\n", path);
+++            status = 1;
+++            continue;
+++        }
+++
+++        // 拼接子路径，例如 "." + "/" + "a" 得到 "./a"。
+++        memmove(child, path, path_len);
+++
+++        int pos = path_len;
+++        if(need_slash)
+++            child[pos++] = '/';
+++
+++        memmove(child + pos, name, name_len + 1);
+++
+++        // 子路径是文件时检查名字，是目录时继续遍历。
+++        if(find(child, target) != 0)
+++            status = 1;
+++    }
+++
+++    if(n != 0){
+++        fprintf(2, "find: cannot read directory %s\n", path);
+++        status = 1;
+++    }
+++
+++    close(fd);
+++    return status;
+++}
+++
+++int
+++main(int argc, char *argv[])
+++{
+++    if(argc != 3){
+++        fprintf(2, "Usage: find <path> <name>\n");
+++        exit(1);
+++    }
+++
+++    exit(find(argv[1], argv[2]));
+++}
++\ No newline at end of file
++diff --git a/user/pingpong.c b/user/pingpong.c
++new file mode 100644
++index 0000000..559673f
++--- /dev/null
+++++ b/user/pingpong.c
++@@ -0,0 +1,36 @@
+++#include "kernel/types.h"
+++#include "kernel/stat.h"
+++#include "user/user.h"
+++int main(int argc, char *argv[])
+++{
+++    int p[2];//子进程读，父进程写
+++    pipe(p);
+++    int q[2];//父进程读，子进程写
+++    pipe(q);
+++    int parent_pid = getpid();
+++    int pid;
+++    pid = fork();
+++    int child_pid;
+++    if(pid == 0)
+++    {
+++        // child process
+++        child_pid = getpid();
+++        close(p[1]);
+++        close(q[0]);
+++        int x;
+++        read(p[0], &x, sizeof(x));
+++        printf("%d: received ping from pid %d\n", child_pid, parent_pid);
+++        write(q[1], &x, sizeof(x));
+++    }
+++    else
+++    {
+++        // parent process
+++        close(p[0]);
+++        close(q[1]);
+++        int x = 1;
+++        write(p[1], &x, sizeof(x));
+++        read(q[0], &x, sizeof(x));
+++        printf("%d: received pong from pid %d\n", parent_pid, pid);
+++    }
+++   exit(0);
+++}
++diff --git a/user/sleep.c b/user/sleep.c
++new file mode 100644
++index 0000000..3b03127
++--- /dev/null
+++++ b/user/sleep.c
++@@ -0,0 +1,16 @@
+++#include "kernel/types.h"
+++#include "user/user.h"
+++
+++int
+++main(int argc, char *argv[])
+++{
+++  if(argc != 2){
+++    printf("Sleep needs one argument!\n");
+++    exit(-1);
+++  }
+++
+++  int ticks = atoi(argv[1]);
+++  sleep(ticks);
+++  printf("Sleep %d\n", ticks);
+++  exit(0);
+++}
+diff --git a/name b/name
+new file mode 100644
+index 0000000..e69de29
 diff --git a/user/find.c b/user/find.c
 new file mode 100644
 index 0000000..d3d2046
