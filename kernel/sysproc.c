@@ -130,3 +130,71 @@ uint64 sys_yield(void) {
   yield();
   return 0;
 }
+
+uint64 sys_seccomp_ctl(void) {
+  int op;
+  uint64 arg;
+  struct proc *p = myproc();
+
+  if (argint(0, &op) < 0)
+    return -1;
+
+  if (argaddr(1, &arg) < 0)
+    return -1;
+
+  if (op == 0) {
+    p->seccomp_mask = arg;
+    return 0;
+  }
+
+  if (op == 1) {
+    if (arg > 0x7fffffffUL)
+      return -1;
+
+    p->max_children = (int)arg;
+    return 0;
+  }
+
+  return -1;
+}
+uint64 sys_seccomp_getlog(void) {
+  uint64 buf_addr;
+  uint64 len_addr;
+  int capacity;
+  int count;
+  struct proc *p = myproc();
+
+  if (argaddr(0, &buf_addr) < 0)
+    return -1;
+
+  if (argaddr(1, &len_addr) < 0)
+    return -1;
+
+  if (copyin(p->pagetable,
+             (char *)&capacity,
+             len_addr,
+             sizeof(capacity)) < 0)
+    return -1;
+
+  if (capacity < 0)
+    return -1;
+
+  count = p->seccomp_log_count;
+  if (count > capacity)
+    count = capacity;
+
+  if (count > 0 &&
+      copyout(p->pagetable,
+              buf_addr,
+              (char *)p->seccomp_log,
+              count * sizeof(p->seccomp_log[0])) < 0)
+    return -1;
+
+  if (copyout(p->pagetable,
+              len_addr,
+              (char *)&count,
+              sizeof(count)) < 0)
+    return -1;
+
+  return 0;
+}

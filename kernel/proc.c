@@ -10,6 +10,8 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
+static struct spinlock child_count_lock;
+
 static char *state_names[] = {
     [UNUSED]   = "unused",
     [SLEEPING] = "sleep",
@@ -34,6 +36,7 @@ void procinit(void) {
   struct proc *p;
 
   initlock(&pid_lock, "nextpid");
+  initlock(&child_count_lock, "childcount");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
 
@@ -104,7 +107,11 @@ static struct proc *allocproc(void) {
 
 found:
   p->pid = allocpid();
-
+  p->seccomp_mask = ~0UL;
+  memset(p->seccomp_log, 0, sizeof(p->seccomp_log));
+  p->seccomp_log_count = 0;
+  p->max_children = -1;
+  p->child_count = 0;
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
     release(&p->lock);
@@ -143,6 +150,11 @@ static void freeproc(struct proc *p) {
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->seccomp_mask = ~0UL;
+  memset(p->seccomp_log, 0, sizeof(p->seccomp_log));
+  p->seccomp_log_count = 0;
+  p->max_children = -1;
+  p->child_count = 0;
   p->state = UNUSED;
 }
 
@@ -233,25 +245,50 @@ int growproc(int n) {
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
+static int reserve_child_slot(struct proc *p) {
+  acquire(&child_count_lock);
+
+  if (p->max_children >= 0 &&
+      p->child_count >= p->max_children) {
+    release(&child_count_lock);
+    return -1;
+  }
+
+  p->child_count++;
+
+  release(&child_count_lock);
+  return 0;
+}
+
+static void release_child_slot(struct proc *p) {
+  acquire(&child_count_lock);
+  p->child_count--;
+  release(&child_count_lock);
+}
 int fork(void) {
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
+  if (reserve_child_slot(p) < 0)
+  return -1;
 
   // Allocate process.
-  if ((np = allocproc()) == 0) {
-    return -1;
-  }
-
+ if ((np = allocproc()) == 0) {
+  release_child_slot(p);
+  return -1;
+}
   // Copy user memory from parent to child.
   if (uvmcopy(p->pagetable, np->pagetable, p->sz) < 0) {
-    freeproc(np);
-    release(&np->lock);
-    return -1;
-  }
+  freeproc(np);
+  release(&np->lock);
+  release_child_slot(p);
+  return -1;
+}
   np->sz = p->sz;
 
   np->parent = p;
+  np->seccomp_mask = p->seccomp_mask;
+np->max_children = p->max_children;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -298,7 +335,13 @@ void reparent(struct proc *p) {
           state_names[pp->state]);
 
       child_num++;
+     acquire(&child_count_lock);
+
+      p->child_count--;
+      initproc->child_count++;
       pp->parent = initproc;
+
+      release(&child_count_lock);
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
@@ -408,6 +451,7 @@ int wait(uint64 addr,int flags) {
             return -1;
           }
           freeproc(np);
+          release_child_slot(p);
           release(&np->lock);
           release(&p->lock);
           return pid;
