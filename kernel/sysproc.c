@@ -19,9 +19,15 @@ uint64 sys_getpid(void) { return myproc()->pid; }
 uint64 sys_fork(void) { return fork(); }
 
 uint64 sys_wait(void) {
-  uint64 p;
-  if (argaddr(0, &p) < 0) return -1;
-  return wait(p);
+  uint64 addr;
+  int flags;
+  if (argaddr(0, &addr) < 0)
+    return -1;
+
+  if (argint(1, &flags) < 0)
+    return -1;
+
+  return wait(addr, flags);
 }
 
 uint64 sys_sbrk(void) {
