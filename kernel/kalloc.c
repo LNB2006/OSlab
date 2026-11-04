@@ -21,12 +21,14 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < NCPU; i++)
+    initlock(&kmem[i].lock, "kmem");
+
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,27 +58,80 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+   push_off();
+  int cpu = cpuid();
+
+  acquire(&kmem[cpu].lock);
+  r->next = kmem[cpu].freelist;
+  kmem[cpu].freelist = r;
+  release(&kmem[cpu].lock);
+
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
+static struct run *
+borrow(int cpu)
+{
+  for(int offset = 1; offset < NCPU; offset++){
+    int donor = (cpu + offset) % NCPU;
+
+    acquire(&kmem[donor].lock);
+
+    struct run *first = kmem[donor].freelist;
+    if(first == 0){
+      release(&kmem[donor].lock);
+      continue;
+    }
+
+    // Detach up to 32 pages from the donor.
+    struct run *last = first;
+    for(int count = 1; count < 32 && last->next != 0; count++)
+      last = last->next;
+
+    kmem[donor].freelist = last->next;
+    last->next = 0;
+
+    release(&kmem[donor].lock);
+
+    // The detached chain is private now.
+    // Return its first page and put the rest on the local free list.
+    if(first->next != 0){
+      acquire(&kmem[cpu].lock);
+      last->next = kmem[cpu].freelist;
+      kmem[cpu].freelist = first->next;
+      release(&kmem[cpu].lock);
+    }
+
+    return first;
+  }
+
+  return 0;
+}
+
 void *
 kalloc(void)
 {
-  struct run *r;
+  push_off();
+  int cpu = cpuid();
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  acquire(&kmem[cpu].lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  struct run *r = kmem[cpu].freelist;
+  if(r != 0)
+    kmem[cpu].freelist = r->next;
+
+  release(&kmem[cpu].lock);
+
+  if(r == 0)
+    r = borrow(cpu);
+
+  pop_off();
+
+  if(r != 0)
+    memset(r, 5, PGSIZE);
+
+  return r;
 }
